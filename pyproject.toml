@@ -8,6 +8,9 @@ version = "0.1.0"
 description = "Auditable, retrying M-Pesa OpenAPI client with optional Celery/Redis background processing."
 readme = "README.md"
 requires-python = ">=3.10"
+license = { text = "MIT" }
+license-files = ["LICENSE"]
+classifiers = ["License :: OSI Approved :: MIT License"]
 dependencies = [
     "httpx>=0.25",
     "cryptography>=41",

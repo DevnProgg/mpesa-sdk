@@ -1,0 +1,50 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mpesa-sdk"
+version = "0.1.0"
+description = "Auditable, retrying M-Pesa OpenAPI client with optional Celery/Redis background processing."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "httpx>=0.25",
+    "cryptography>=41",
+]
+
+[project.optional-dependencies]
+# Background processing: pip install "mpesa-sdk[queue]"
+queue = ["celery[redis]>=5.3"]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=5",
+    "ruff>=0.5",
+    "celery[redis]>=5.3",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/MpesaSDK"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+    "integration: needs a real Redis (set REDIS_URL, e.g. redis://localhost:6379/15)",
+]
+
+[tool.coverage.run]
+source = ["MpesaSDK"]
+branch = true
+
+[tool.ruff]
+line-length = 99
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["E501", "B018", "RUF012"]

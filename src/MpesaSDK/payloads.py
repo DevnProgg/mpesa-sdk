@@ -1,4 +1,7 @@
-"""Transaction payload validation.
+"""Transaction payload validation for the single-stage C2B and B2C endpoints.
+
+Both endpoints take the same fields; they differ only in the name of the description
+field (``input_PurchasedItemsDesc`` vs ``input_PaymentItemsDesc``) and in who pays whom.
 
 Developers send friendly keys (``amount``, ``customer_msisdn`` ...). The raw OpenAPI
 names (``input_Amount`` ...) are accepted too. Country and currency come from the market.
@@ -11,7 +14,7 @@ import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, ClassVar
 
 from .errors import ValidationError
 from .markets import Market
@@ -22,7 +25,7 @@ _REFERENCE = re.compile(r"^\w{1,20}$", re.ASCII)
 _THIRD_PARTY_ID = re.compile(r"^\w{1,40}$", re.ASCII)
 
 # squashed key (lower-case, no "-", "_" or "input" prefix) -> canonical field name
-_ALIASES = {
+_COMMON_ALIASES = {
     "amount": "amount",
     "customermsisdn": "customer_msisdn",
     "msisdn": "customer_msisdn",
@@ -30,33 +33,17 @@ _ALIASES = {
     "shortcode": "service_provider_code",
     "transactionreference": "transaction_reference",
     "reference": "transaction_reference",
-    "purchaseditemsdesc": "purchased_items_desc",
-    "description": "purchased_items_desc",
     "thirdpartyconversationid": "third_party_conversation_id",
     "idempotencykey": "third_party_conversation_id",
     "country": "country",
     "currency": "currency",
+    "description": "items_desc",
 }
 
 
 def _squash(key: str) -> str:
     squashed = key.strip().lower().replace("-", "").replace("_", "")
     return squashed.removeprefix("input")
-
-
-def canonicalise(raw: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, str]]:
-    """Map caller keys to canonical field names. Returns ``(fields, errors)``."""
-    found: dict[str, Any] = {}
-    errors: dict[str, str] = {}
-    for key, value in raw.items():
-        canonical = _ALIASES.get(_squash(str(key)))
-        if canonical is None:
-            errors[str(key)] = "unknown field"
-        elif canonical in found:
-            errors[canonical] = "provided more than once"
-        else:
-            found[canonical] = value
-    return found, errors
 
 
 def _parse_amount(value: Any) -> str:
@@ -93,26 +80,50 @@ _REQUIRED = {
     "amount": _parse_amount,
     "service_provider_code": _match(_SHORTCODE, "must be 4-12 letters/digits"),
     "transaction_reference": _match(_REFERENCE, "must be 1-20 letters, digits or underscores"),
-    "purchased_items_desc": _description,
+    "items_desc": _description,
 }
 
 
 @dataclass(frozen=True, slots=True)
-class C2BSingleStagePayload:
-    """Validated payload for the C2B single-stage endpoint."""
+class SingleStagePayload:
+    """Validated payload shared by the single-stage endpoints. Use a subclass."""
+
+    # Subclass hooks
+    DESC_FIELD: ClassVar[str]  # public name of the description field (used in error messages)
+    DESC_REQUEST_KEY: ClassVar[str]  # OpenAPI body key for the description
 
     amount: str
     customer_msisdn: str
     service_provider_code: str
     transaction_reference: str
-    purchased_items_desc: str
+    items_desc: str
     third_party_conversation_id: str
     country: str
     currency: str
 
     @classmethod
-    def from_mapping(cls, raw: Mapping[str, Any], market: Market) -> C2BSingleStagePayload:
-        fields, errors = canonicalise(raw)
+    def _aliases(cls) -> dict[str, str]:
+        return {**_COMMON_ALIASES, _squash(cls.DESC_REQUEST_KEY): "items_desc"}
+
+    @classmethod
+    def _canonicalise(cls, raw: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, str]]:
+        """Map caller keys to canonical field names. Returns ``(fields, errors)``."""
+        aliases = cls._aliases()
+        found: dict[str, Any] = {}
+        errors: dict[str, str] = {}
+        for key, value in raw.items():
+            canonical = aliases.get(_squash(str(key)))
+            if canonical is None:
+                errors[str(key)] = "unknown field"
+            elif canonical in found:
+                errors[canonical] = "provided more than once"
+            else:
+                found[canonical] = value
+        return found, errors
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, Any], market: Market) -> SingleStagePayload:
+        fields, errors = cls._canonicalise(raw)
         clean: dict[str, str] = {}
 
         for name, check in _REQUIRED.items():
@@ -146,33 +157,43 @@ class C2BSingleStagePayload:
             clean[name] = expected
 
         if errors:
-            raise ValidationError(errors)
+            raise ValidationError(
+                {cls.DESC_FIELD if k == "items_desc" else k: m for k, m in errors.items()}
+            )
         return cls(**clean)
 
-    @staticmethod
-    def peek(raw: Mapping[str, Any]) -> dict[str, str | None]:
+    @classmethod
+    def peek(cls, raw: Mapping[str, Any]) -> dict[str, str | None]:
         """Best-effort amount/recipient/payer for the audit trail of a rejected payload."""
-        fields, _ = canonicalise(raw)
+        fields, _ = cls._canonicalise(raw)
 
         def text(name: str) -> str | None:
             value = fields.get(name)
             return None if value is None else str(value)
 
+        shortcode, msisdn = text("service_provider_code"), text("customer_msisdn")
+        recipient, payer = cls._roles(shortcode, msisdn)
         return {
             "amount": text("amount"),
-            "recipient": text("service_provider_code"),
-            "payer": text("customer_msisdn"),
+            "recipient": recipient,
+            "payer": payer,
             "transaction_id": text("third_party_conversation_id"),
         }
 
+    @staticmethod
+    def _roles(shortcode: Any, msisdn: Any) -> tuple[Any, Any]:
+        """Return ``(recipient, payer)``. Overridden per direction of funds."""
+        raise NotImplementedError
+
     @property
     def recipient(self) -> str:
-        """The party receiving the funds (for C2B: the business shortcode)."""
-        return self.service_provider_code
+        """The party receiving the funds."""
+        return self._roles(self.service_provider_code, self.customer_msisdn)[0]
 
     @property
     def payer(self) -> str:
-        return self.customer_msisdn
+        """The party the funds are taken from."""
+        return self._roles(self.service_provider_code, self.customer_msisdn)[1]
 
     @property
     def transaction_id(self) -> str:
@@ -188,5 +209,29 @@ class C2BSingleStagePayload:
             "input_ServiceProviderCode": self.service_provider_code,
             "input_ThirdPartyConversationID": self.third_party_conversation_id,
             "input_TransactionReference": self.transaction_reference,
-            "input_PurchasedItemsDesc": self.purchased_items_desc,
+            self.DESC_REQUEST_KEY: self.items_desc,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class C2BSingleStagePayload(SingleStagePayload):
+    """Customer pays the business: recipient is the shortcode, payer is the customer."""
+
+    DESC_FIELD: ClassVar[str] = "purchased_items_desc"
+    DESC_REQUEST_KEY: ClassVar[str] = "input_PurchasedItemsDesc"
+
+    @staticmethod
+    def _roles(shortcode: Any, msisdn: Any) -> tuple[Any, Any]:
+        return shortcode, msisdn
+
+
+@dataclass(frozen=True, slots=True)
+class B2CSingleStagePayload(SingleStagePayload):
+    """Business pays the customer: recipient is the customer, payer is the shortcode."""
+
+    DESC_FIELD: ClassVar[str] = "payment_items_desc"
+    DESC_REQUEST_KEY: ClassVar[str] = "input_PaymentItemsDesc"
+
+    @staticmethod
+    def _roles(shortcode: Any, msisdn: Any) -> tuple[Any, Any]:
+        return msisdn, shortcode

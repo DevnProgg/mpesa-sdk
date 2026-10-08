@@ -1,6 +1,6 @@
 # mpesa-sdk
 
-Auditable, retrying client for the M-Pesa OpenAPI (C2B single stage, sync and async), with
+Auditable, retrying client for the M-Pesa OpenAPI (C2B and B2C single stage, sync and async), with
 optional Celery + Redis background processing.
 
 ```bash
@@ -41,6 +41,32 @@ if not response.ok:
 it returns a response whose `ok`, `status`, `err` and `audit` describe what happened. Programmer
 errors (unknown transaction type) raise `ValueError`; bad configuration raises `ConfigError` at
 `mp.config(...)` time.
+
+## Supported transactions
+
+| `mp.transactions.` | Endpoint | Funds flow | Final result |
+|---|---|---|---|
+| `C2B_SINGLE_STAGE` | `c2bPayment/singleStage/` | customer -> business | in the response |
+| `C2B_SINGLE_STAGE_ASYNC` | same | customer -> business | by callback (`PENDING` first) |
+| `B2C_SINGLE_STAGE` | `b2cPayment/` | business -> customer | in the response |
+| `B2C_SINGLE_STAGE_ASYNC` | same | business -> customer | by callback (`PENDING` first) |
+
+B2C payload (friendly keys; the raw `input_*` names also work):
+
+```python
+response = await provider.initialize_transaction(
+    type=mp.transactions.B2C_SINGLE_STAGE,
+    payload={"amount": "250.00", "customer_msisdn": "26658123456",   # who gets paid
+             "service_provider_code": "000000",                         # your shortcode
+             "reference": "SAL2026", "description": "Salary payment"},
+)
+```
+
+In the audit trail `recipient` is whoever **receives** the money: the shortcode for C2B, the
+customer's number for B2C (and `payer` is the other party). The B2C description is sent as
+`input_PaymentItemsDesc` (C2B uses `input_PurchasedItemsDesc`); `description` works for both.
+Payouts move money out, so the retry rules below matter even more: one idempotency key per
+payout, and `UNKNOWN` means *reconcile before paying again*. See `examples/b2c_single_stage.py`.
 
 ## Configuration
 
@@ -132,9 +158,13 @@ return cb.ack()  # required reply to M-Pesa
 
 ```bash
 pip install -e ".[dev]"
-pytest                                   # 141 tests, no network, no Redis needed
+pytest                                   # ~170 tests, ~1s, no network or Redis needed
 REDIS_URL=redis://localhost:6379/15 pytest   # also runs the real Celery worker + Redis test
 ruff check . && ruff format .
 ```
 Tests use a scriptable fake of the M-Pesa API that decrypts the real RSA bearer tokens, so the
 encryption, headers, URLs, retry sequencing and audit output are all exercised end to end.
+
+## License
+
+MIT. Free for personal and commercial use; see `LICENSE`.

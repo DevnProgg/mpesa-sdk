@@ -102,18 +102,13 @@ async def test_unexpected_worker_bug_still_yields_an_audit(queued, fake, payload
     assert final.status is mp.TransactionStatus.UNKNOWN and final.err.code == "INTERNAL_ERROR"
 
 
-async def test_unreachable_broker_returns_an_audited_failure(make_provider, payload):
-    provider = make_provider(
-        **{
-            "concurrency": True,
-            "celery-options": {
-                "broker_url": "redis://127.0.0.1:1/0",
-                "broker_connection_retry": False,
-                "broker_transport_options": {"max_retries": 0, "socket_connect_timeout": 0.2},
-            },
-        }
-    )
+async def test_unreachable_broker_returns_an_audited_failure_quickly(make_provider, payload):
+    import time
+
+    provider = make_provider(**{"concurrency": True, "redis-url": "redis://127.0.0.1:1/0"})
+    started = time.monotonic()
     response = await provider.initialize_transaction(C2B, payload)
+    assert time.monotonic() - started < 10  # fail fast, do not hang on a dead broker
     assert not response.ok and response.err.code == "QUEUE_UNAVAILABLE" and response.err.retryable
     assert response.audit.status is mp.TransactionStatus.FAILED
 

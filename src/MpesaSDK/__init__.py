@@ -27,7 +27,7 @@ from .transactions import TransactionStatus, TransactionType
 transactions = TransactionType  # mp.transactions.C2B_SINGLE_STAGE_ASYNC
 status = TransactionStatus
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "AttemptRecord",

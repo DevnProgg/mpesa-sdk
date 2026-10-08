@@ -48,6 +48,7 @@ KNOWN_CODES = {
     "INS-26": "Invalid Currency Used",
     "INS-28": "Invalid ThirdPartyConversationID Used",
     "INS-30": "Invalid Purchased Items Description Used",
+    "INS-31": "Invalid Payment Items Description Used",  # B2C
     "INS-989": "Session Creation Failed",
     "INS-990": "Customer Transaction Value Limit Breached",
     "INS-991": "Customer Transaction Count Limit Breached",
@@ -58,6 +59,7 @@ KNOWN_CODES = {
     "INS-996": "API Being Used Outside Of Usage Time",
     "INS-997": "API Not Enabled",
     "INS-998": "Invalid Market",
+    "INS-999": "Invalid Use Case",  # observed in the sandbox; not in the published tables
     "INS-2006": "Insufficient balance",
     "INS-2051": "MSISDN invalid.",
 }

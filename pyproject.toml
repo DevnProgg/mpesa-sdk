@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mpesa-sdk"
-version = "0.1.0"
+version = "0.2.0"
 description = "Auditable, retrying M-Pesa OpenAPI client with optional Celery/Redis background processing."
 readme = "README.md"
 requires-python = ">=3.10"

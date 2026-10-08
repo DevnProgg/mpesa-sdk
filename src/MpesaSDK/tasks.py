@@ -46,6 +46,26 @@ class CeleryQueue:
             task_default_queue=config.queue,
             result_expires=86_400,
             broker_connection_retry_on_startup=True,
+            # Fail fast if Redis is down: the caller gets QUEUE_UNAVAILABLE in about a
+            # second instead of blocking while Celery retries the connection.
+            task_publish_retry=True,
+            task_publish_retry_policy={
+                "max_retries": 2,
+                "interval_start": 0,
+                "interval_step": 0.2,
+                "interval_max": 0.5,
+            },
+            broker_connection_timeout=2,
+            # The result backend has its own (long) reconnect policy: bound it too.
+            result_backend_transport_options={
+                "retry_policy": {
+                    "max_retries": 2,
+                    "interval_start": 0,
+                    "interval_step": 0.2,
+                    "interval_max": 0.5,
+                },
+            },
+            broker_transport_options={"socket_connect_timeout": 2, "socket_timeout": 5},
         )
         app.conf.update(dict(config.celery_options))
         self.app = app

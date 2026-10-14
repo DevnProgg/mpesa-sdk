@@ -7,7 +7,7 @@ import MpesaSDK as mp
 provider = mp.config(
     {
         "market": mp.markets.LESOTHO,
-        "api-key": "your api key",
+        "api-key": "your api key",  
         "public-key": "your public key",
         "live": False,
         "retry-strategy": {"retry-count": 3, "back-off": 5.0, "jitter": 2},
@@ -21,7 +21,7 @@ async def main() -> None:
         type=mp.transactions.C2B_SINGLE_STAGE,
         payload={
             "amount": "10.00",
-            "customer_msisdn": "26658123456",
+            "customer_msisdn": "000000000001",
             "service_provider_code": "000000",
             "reference": "T1234C",
             "description": "Shoes",

@@ -12,6 +12,8 @@ class TransactionType(str, Enum):
     C2B_SINGLE_STAGE_ASYNC = "c2b_single_stage_async"
     B2C_SINGLE_STAGE = "b2c_single_stage"
     B2C_SINGLE_STAGE_ASYNC = "b2c_single_stage_async"
+    B2B_SINGLE_STAGE = "b2b_single_stage"
+    B2B_SINGLE_STAGE_ASYNC = "b2b_single_stage_async"
 
 
 class TransactionStatus(str, Enum):

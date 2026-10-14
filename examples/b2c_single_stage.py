@@ -15,7 +15,7 @@ import MpesaSDK as mp
 provider = mp.config(
     {
         "market": mp.markets.LESOTHO,
-        "api-key": "your api key",
+        "api-key": "your api key",  
         "public-key": "your public key",
         "live": False,
         "retry-strategy": {"retry-count": 3, "back-off": 5.0, "jitter": 2},
@@ -28,7 +28,7 @@ async def main() -> None:
         type=mp.transactions.B2C_SINGLE_STAGE,
         payload={
             "amount": "250.00",
-            "customer_msisdn": "26658123456",  # who gets paid
+            "customer_msisdn": "000000000001",  # who gets paid
             "service_provider_code": "000000",  # your business shortcode (funds come from here)
             "reference": "SAL2026",
             "description": "Salary payment",

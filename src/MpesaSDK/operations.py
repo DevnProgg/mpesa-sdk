@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .payloads import B2CSingleStagePayload, C2BSingleStagePayload, SingleStagePayload
+from .payloads import (
+    B2BSingleStagePayload,
+    B2CSingleStagePayload,
+    C2BSingleStagePayload,
+    SingleStagePayload,
+)
 from .transactions import TransactionType
 
 
@@ -35,5 +40,11 @@ OPERATIONS: dict[TransactionType, Operation] = {
         TransactionType.B2C_SINGLE_STAGE_ASYNC,
         "b2cPayment/",
         B2CSingleStagePayload,
+    ),
+    **_both(
+        TransactionType.B2B_SINGLE_STAGE,
+        TransactionType.B2B_SINGLE_STAGE_ASYNC,
+        "b2bPayment/",
+        B2BSingleStagePayload,
     ),
 }

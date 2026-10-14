@@ -1,7 +1,7 @@
-"""Transaction payload validation for the single-stage C2B and B2C endpoints.
+"""Transaction payload validation for the single-stage C2B, B2C and B2B endpoints.
 
-Both endpoints take the same fields; they differ only in the name of the description
-field (``input_PurchasedItemsDesc`` vs ``input_PaymentItemsDesc``) and in who pays whom.
+Each payload class declares its fields, the OpenAPI key for each, and which field is the
+recipient and which the payer; validation and serialisation are shared.
 
 Developers send friendly keys (``amount``, ``customer_msisdn`` ...). The raw OpenAPI
 names (``input_Amount`` ...) are accepted too. Country and currency come from the market.
@@ -27,10 +27,6 @@ _THIRD_PARTY_ID = re.compile(r"^\w{1,40}$", re.ASCII)
 # squashed key (lower-case, no "-", "_" or "input" prefix) -> canonical field name
 _COMMON_ALIASES = {
     "amount": "amount",
-    "customermsisdn": "customer_msisdn",
-    "msisdn": "customer_msisdn",
-    "serviceprovidercode": "service_provider_code",
-    "shortcode": "service_provider_code",
     "transactionreference": "transaction_reference",
     "reference": "transaction_reference",
     "thirdpartyconversationid": "third_party_conversation_id",
@@ -78,32 +74,32 @@ def _description(value: Any) -> str:
 
 _REQUIRED = {
     "amount": _parse_amount,
-    "service_provider_code": _match(_SHORTCODE, "must be 4-12 letters/digits"),
     "transaction_reference": _match(_REFERENCE, "must be 1-20 letters, digits or underscores"),
     "items_desc": _description,
 }
 
 
-@dataclass(frozen=True, slots=True)
 class SingleStagePayload:
-    """Validated payload shared by the single-stage endpoints. Use a subclass."""
+    """Base for validated single-stage payloads. Subclasses are frozen dataclasses."""
 
-    # Subclass hooks
+    __slots__ = ()
+
     DESC_FIELD: ClassVar[str]  # public name of the description field (used in error messages)
     DESC_REQUEST_KEY: ClassVar[str]  # OpenAPI body key for the description
-
-    amount: str
-    customer_msisdn: str
-    service_provider_code: str
-    transaction_reference: str
-    items_desc: str
-    third_party_conversation_id: str
-    country: str
-    currency: str
+    EXTRA_ALIASES: ClassVar[Mapping[str, str]] = {}  # squashed key -> field, per type
+    REQUEST_KEYS: ClassVar[Mapping[str, str]]  # field -> OpenAPI body key (defines the body)
+    CODE_FIELDS: ClassVar[tuple[str, ...]] = ()  # shortcode-style fields
+    MSISDN_FIELD: ClassVar[str | None] = None  # field holding a customer phone number
+    RECIPIENT_FIELD: ClassVar[str]  # who receives the funds
+    PAYER_FIELD: ClassVar[str]  # who the funds are taken from
 
     @classmethod
     def _aliases(cls) -> dict[str, str]:
-        return {**_COMMON_ALIASES, _squash(cls.DESC_REQUEST_KEY): "items_desc"}
+        return {
+            **_COMMON_ALIASES,
+            **cls.EXTRA_ALIASES,
+            _squash(cls.DESC_REQUEST_KEY): "items_desc",
+        }
 
     @classmethod
     def _canonicalise(cls, raw: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, str]]:
@@ -122,11 +118,21 @@ class SingleStagePayload:
         return found, errors
 
     @classmethod
+    def _cross_validate(cls, clean: dict[str, str], errors: dict[str, str]) -> None:
+        """Hook for rules involving several fields."""
+
+    @classmethod
     def from_mapping(cls, raw: Mapping[str, Any], market: Market) -> SingleStagePayload:
         fields, errors = cls._canonicalise(raw)
         clean: dict[str, str] = {}
 
-        for name, check in _REQUIRED.items():
+        validators = {
+            **_REQUIRED,
+            **{
+                name: _match(_SHORTCODE, "must be 4-12 letters/digits") for name in cls.CODE_FIELDS
+            },
+        }
+        for name, check in validators.items():
             if name not in fields:
                 errors[name] = "is required"
                 continue
@@ -135,13 +141,14 @@ class SingleStagePayload:
             except ValueError as exc:
                 errors[name] = str(exc)
 
-        msisdn = fields.get("customer_msisdn")
-        if msisdn is None:
-            errors["customer_msisdn"] = "is required"
-        elif not isinstance(msisdn, str) or not market.is_valid_msisdn(msisdn):
-            errors["customer_msisdn"] = f"must be digits only and valid for {market.name}"
-        else:
-            clean["customer_msisdn"] = msisdn
+        if cls.MSISDN_FIELD:
+            msisdn = fields.get(cls.MSISDN_FIELD)
+            if msisdn is None:
+                errors[cls.MSISDN_FIELD] = "is required"
+            elif not isinstance(msisdn, str) or not market.is_valid_msisdn(msisdn):
+                errors[cls.MSISDN_FIELD] = f"must be digits only and valid for {market.name}"
+            else:
+                clean[cls.MSISDN_FIELD] = msisdn
 
         # Idempotency key: reused across retries so M-Pesa can detect duplicates.
         tp_id = fields.get("third_party_conversation_id") or uuid.uuid4().hex
@@ -156,6 +163,8 @@ class SingleStagePayload:
                 errors[name] = f"must be {expected!r} for market {market.name}"
             clean[name] = expected
 
+        if not errors:
+            cls._cross_validate(clean, errors)
         if errors:
             raise ValidationError(
                 {cls.DESC_FIELD if k == "items_desc" else k: m for k, m in errors.items()}
@@ -171,67 +180,135 @@ class SingleStagePayload:
             value = fields.get(name)
             return None if value is None else str(value)
 
-        shortcode, msisdn = text("service_provider_code"), text("customer_msisdn")
-        recipient, payer = cls._roles(shortcode, msisdn)
         return {
             "amount": text("amount"),
-            "recipient": recipient,
-            "payer": payer,
+            "recipient": text(cls.RECIPIENT_FIELD),
+            "payer": text(cls.PAYER_FIELD),
             "transaction_id": text("third_party_conversation_id"),
         }
-
-    @staticmethod
-    def _roles(shortcode: Any, msisdn: Any) -> tuple[Any, Any]:
-        """Return ``(recipient, payer)``. Overridden per direction of funds."""
-        raise NotImplementedError
 
     @property
     def recipient(self) -> str:
         """The party receiving the funds."""
-        return self._roles(self.service_provider_code, self.customer_msisdn)[0]
+        return getattr(self, self.RECIPIENT_FIELD)
 
     @property
     def payer(self) -> str:
         """The party the funds are taken from."""
-        return self._roles(self.service_provider_code, self.customer_msisdn)[1]
+        return getattr(self, self.PAYER_FIELD)
 
     @property
     def transaction_id(self) -> str:
-        return self.third_party_conversation_id
+        return self.third_party_conversation_id  # type: ignore[attr-defined]
 
     def to_request(self) -> dict[str, str]:
         """The exact JSON body sent to M-Pesa."""
-        return {
-            "input_Amount": self.amount,
-            "input_Country": self.country,
-            "input_Currency": self.currency,
-            "input_CustomerMSISDN": self.customer_msisdn,
-            "input_ServiceProviderCode": self.service_provider_code,
-            "input_ThirdPartyConversationID": self.third_party_conversation_id,
-            "input_TransactionReference": self.transaction_reference,
-            self.DESC_REQUEST_KEY: self.items_desc,
-        }
+        return {key: getattr(self, name) for name, key in self.REQUEST_KEYS.items()}
+
+
+_CUSTOMER_ALIASES = {
+    "customermsisdn": "customer_msisdn",
+    "msisdn": "customer_msisdn",
+    "serviceprovidercode": "service_provider_code",
+    "shortcode": "service_provider_code",
+}
+
+
+def _customer_request_keys(desc_key: str) -> dict[str, str]:
+    return {
+        "amount": "input_Amount",
+        "country": "input_Country",
+        "currency": "input_Currency",
+        "customer_msisdn": "input_CustomerMSISDN",
+        "service_provider_code": "input_ServiceProviderCode",
+        "third_party_conversation_id": "input_ThirdPartyConversationID",
+        "transaction_reference": "input_TransactionReference",
+        "items_desc": desc_key,
+    }
 
 
 @dataclass(frozen=True, slots=True)
 class C2BSingleStagePayload(SingleStagePayload):
     """Customer pays the business: recipient is the shortcode, payer is the customer."""
 
+    amount: str
+    customer_msisdn: str
+    service_provider_code: str
+    transaction_reference: str
+    items_desc: str
+    third_party_conversation_id: str
+    country: str
+    currency: str
+
     DESC_FIELD: ClassVar[str] = "purchased_items_desc"
     DESC_REQUEST_KEY: ClassVar[str] = "input_PurchasedItemsDesc"
-
-    @staticmethod
-    def _roles(shortcode: Any, msisdn: Any) -> tuple[Any, Any]:
-        return shortcode, msisdn
+    EXTRA_ALIASES: ClassVar[Mapping[str, str]] = _CUSTOMER_ALIASES
+    REQUEST_KEYS: ClassVar[Mapping[str, str]] = _customer_request_keys("input_PurchasedItemsDesc")
+    CODE_FIELDS: ClassVar[tuple[str, ...]] = ("service_provider_code",)
+    MSISDN_FIELD: ClassVar[str | None] = "customer_msisdn"
+    RECIPIENT_FIELD: ClassVar[str] = "service_provider_code"
+    PAYER_FIELD: ClassVar[str] = "customer_msisdn"
 
 
 @dataclass(frozen=True, slots=True)
 class B2CSingleStagePayload(SingleStagePayload):
     """Business pays the customer: recipient is the customer, payer is the shortcode."""
 
+    amount: str
+    customer_msisdn: str
+    service_provider_code: str
+    transaction_reference: str
+    items_desc: str
+    third_party_conversation_id: str
+    country: str
+    currency: str
+
     DESC_FIELD: ClassVar[str] = "payment_items_desc"
     DESC_REQUEST_KEY: ClassVar[str] = "input_PaymentItemsDesc"
+    EXTRA_ALIASES: ClassVar[Mapping[str, str]] = _CUSTOMER_ALIASES
+    REQUEST_KEYS: ClassVar[Mapping[str, str]] = _customer_request_keys("input_PaymentItemsDesc")
+    CODE_FIELDS: ClassVar[tuple[str, ...]] = ("service_provider_code",)
+    MSISDN_FIELD: ClassVar[str | None] = "customer_msisdn"
+    RECIPIENT_FIELD: ClassVar[str] = "customer_msisdn"
+    PAYER_FIELD: ClassVar[str] = "service_provider_code"
 
-    @staticmethod
-    def _roles(shortcode: Any, msisdn: Any) -> tuple[Any, Any]:
-        return msisdn, shortcode
+
+@dataclass(frozen=True, slots=True)
+class B2BSingleStagePayload(SingleStagePayload):
+    """Business pays another business: primary party is debited, receiver party credited."""
+
+    amount: str
+    primary_party_code: str
+    receiver_party_code: str
+    transaction_reference: str
+    items_desc: str
+    third_party_conversation_id: str
+    country: str
+    currency: str
+
+    DESC_FIELD: ClassVar[str] = "purchased_items_desc"
+    DESC_REQUEST_KEY: ClassVar[str] = "input_PurchasedItemsDesc"
+    EXTRA_ALIASES: ClassVar[Mapping[str, str]] = {
+        "primarypartycode": "primary_party_code",
+        "primary": "primary_party_code",
+        "receiverpartycode": "receiver_party_code",
+        "receiver": "receiver_party_code",
+    }
+    REQUEST_KEYS: ClassVar[Mapping[str, str]] = {
+        "amount": "input_Amount",
+        "receiver_party_code": "input_ReceiverPartyCode",
+        "country": "input_Country",
+        "currency": "input_Currency",
+        "primary_party_code": "input_PrimaryPartyCode",
+        "third_party_conversation_id": "input_ThirdPartyConversationID",
+        "transaction_reference": "input_TransactionReference",
+        "items_desc": "input_PurchasedItemsDesc",
+    }
+    CODE_FIELDS: ClassVar[tuple[str, ...]] = ("primary_party_code", "receiver_party_code")
+    RECIPIENT_FIELD: ClassVar[str] = "receiver_party_code"
+    PAYER_FIELD: ClassVar[str] = "primary_party_code"
+
+    @classmethod
+    def _cross_validate(cls, clean: dict[str, str], errors: dict[str, str]) -> None:
+        if clean["primary_party_code"] == clean["receiver_party_code"]:
+            errors["receiver_party_code"] = "must differ from primary_party_code"

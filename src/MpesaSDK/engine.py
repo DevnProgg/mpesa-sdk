@@ -62,7 +62,9 @@ class TransactionEngine:
             # No payment request was sent, so retrying is always safe.
             verdict = Verdict(Disposition.RETRY, "SESSION_ERROR", str(exc))
         else:
-            response = await self._client.post(operation.path, session, audit.request_payload)
+            response = await self._client.send(
+                operation.method, operation.path, session, audit.request_payload
+            )
             verdict = classify(response)
             status_code, body_code = response.status_code, response.code
             if response.body:

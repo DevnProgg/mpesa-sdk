@@ -95,6 +95,7 @@ def test_peek_assigns_customer_as_recipient(b2c):
         "recipient": "26658123456",
         "payer": "ORG001",
         "transaction_id": "tp0001",
+        "related_transaction_id": None,
     }
 
 

@@ -43,6 +43,7 @@ KNOWN_CODES = {
     "INS-13": "Invalid Shortcode Used",
     "INS-15": "Invalid Amount Used",
     "INS-17": "Invalid Transaction Reference. Length Should Be Between 1 and 20.",
+    "INS-18": "Invalid TransactionID Used",  # reversals
     "INS-20": "Not All Parameters Provided. Please try again.",
     "INS-21": "Parameter validations failed. Please try again.",
     "INS-26": "Invalid Currency Used",
@@ -50,6 +51,7 @@ KNOWN_CODES = {
     "INS-30": "Invalid Purchased Items Description Used",
     "INS-31": "Invalid Payment Items Description Used",  # B2C
     "INS-989": "Session Creation Failed",
+    "INS-35": "This transaction do not belong to you",  # reversals
     "INS-990": "Customer Transaction Value Limit Breached",
     "INS-991": "Customer Transaction Count Limit Breached",
     "INS-992": "Multiple Limits Breached",

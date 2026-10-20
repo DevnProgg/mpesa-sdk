@@ -115,4 +115,10 @@ def test_country_must_match_market(good):
 
 def test_peek_is_best_effort():
     peek = P.peek({"amount": "abc", "shortcode": "ORG1", "msisdn": 5})
-    assert peek == {"amount": "abc", "recipient": "ORG1", "payer": "5", "transaction_id": None}
+    assert peek == {
+        "amount": "abc",
+        "recipient": "ORG1",
+        "payer": "5",
+        "transaction_id": None,
+        "related_transaction_id": None,
+    }

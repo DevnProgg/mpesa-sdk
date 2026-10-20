@@ -74,12 +74,13 @@ class MpesaProvider:
             transaction_id=parsed.transaction_id,
             transaction_type=operation.type.value,
             amount=parsed.amount,
-            currency=parsed.currency,
+            currency=self._config.market.currency,
             recipient=parsed.recipient,
             payer=parsed.payer,
             timestamp=utc_now(),
             status=TransactionStatus.QUEUED,
             request_payload=parsed.to_request(),
+            related_transaction_id=parsed.related_transaction_id,
         )
         if self._queue is not None:
             return await self._enqueue(operation, audit)
@@ -157,6 +158,7 @@ class MpesaProvider:
             status=TransactionStatus.FAILED,
             request_payload=jsonable(dict(raw)),
             completed_at=utc_now(),
+            related_transaction_id=peek["related_transaction_id"],
         )
         failure = TransactionFailure("VALIDATION_ERROR", str(exc))
         return TransactionResponse(TransactionStatus.FAILED, audit, failure)

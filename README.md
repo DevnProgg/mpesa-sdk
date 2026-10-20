@@ -1,6 +1,6 @@
 # mpesa-sdk
 
-Auditable, retrying client for the M-Pesa OpenAPI (C2B, B2C and B2B single stage, sync and async), with
+Auditable, retrying client for the M-Pesa OpenAPI (C2B, B2C and B2B single stage plus reversals, sync and async), with
 optional Celery + Redis background processing.
 
 ```bash
@@ -52,6 +52,8 @@ errors (unknown transaction type) raise `ValueError`; bad configuration raises `
 | `B2C_SINGLE_STAGE_ASYNC` | same | business -> customer | by callback (`PENDING` first) |
 | `B2B_SINGLE_STAGE` | `b2bPayment/` | business -> business | in the response |
 | `B2B_SINGLE_STAGE_ASYNC` | same | business -> business | by callback (`PENDING` first) |
+| `REVERSAL` | `reversal/` (**PUT**) | back to the original initiator | in the response |
+| `REVERSAL_ASYNC` | same | back to the original initiator | by callback (`PENDING` first) |
 
 B2C payload (friendly keys; the raw `input_*` names also work):
 
@@ -87,6 +89,27 @@ payload = {
     "description": "Stock purchase",
 }
 ```
+
+Reversals undo a successful transaction by its **M-Pesa transaction id** (the
+`mpesa_transaction_id` in the audit log you stored when you made it; for `*_ASYNC` payments it is
+filled in once the callback arrives; it is not your own idempotency key):
+
+```python
+undo = await provider.initialize_transaction(
+    type=mp.transactions.REVERSAL,
+    payload={
+        "transaction_id": paid_audit["mpesa_transaction_id"],
+        "service_provider_code": "ORG001",  # who the funds go back to
+        "amount": "25",
+    },  # omit for a full reversal
+)
+undo.audit.log["related_transaction_id"]  # the transaction that was reversed
+```
+
+A reversal has no currency, reference or description, so passing them is a validation error. In its
+audit trail `amount` is `None` for a full reversal, `recipient` is the shortcode, and `payer` is
+`None` (the call does not name the party the money is taken from). Reversals follow the same retry
+rules, with their own idempotency key. See `examples/reversal.py`.
 
 ## Configuration
 
@@ -178,7 +201,7 @@ return cb.ack()  # required reply to M-Pesa
 
 ```bash
 pip install -e ".[dev]"
-pytest                                   # ~200 tests, ~2s, no network or Redis needed
+pytest                                   # ~245 tests, ~2s, no network or Redis needed
 REDIS_URL=redis://localhost:6379/15 pytest   # also runs the real Celery worker + Redis test
 ruff check . && ruff format .
 ```

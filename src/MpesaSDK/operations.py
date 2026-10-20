@@ -8,6 +8,7 @@ from .payloads import (
     B2BSingleStagePayload,
     B2CSingleStagePayload,
     C2BSingleStagePayload,
+    ReversalPayload,
     SingleStagePayload,
 )
 from .transactions import TransactionType
@@ -19,12 +20,13 @@ class Operation:
     path: str  # endpoint path after /ipg/v2/<market>/
     payload_cls: type[SingleStagePayload]
     awaits_callback: bool  # final result is delivered to your listener, not in the response
+    method: str = "POST"  # HTTP method
 
 
-def _both(sync: TransactionType, async_: TransactionType, path: str, cls):
+def _both(sync: TransactionType, async_: TransactionType, path: str, cls, method: str = "POST"):
     return {
-        sync: Operation(sync, path, cls, False),
-        async_: Operation(async_, path, cls, True),
+        sync: Operation(sync, path, cls, False, method),
+        async_: Operation(async_, path, cls, True, method),
     }
 
 
@@ -46,5 +48,12 @@ OPERATIONS: dict[TransactionType, Operation] = {
         TransactionType.B2B_SINGLE_STAGE_ASYNC,
         "b2bPayment/",
         B2BSingleStagePayload,
+    ),
+    **_both(
+        TransactionType.REVERSAL,
+        TransactionType.REVERSAL_ASYNC,
+        "reversal/",
+        ReversalPayload,
+        method="PUT",
     ),
 }

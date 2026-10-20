@@ -1,7 +1,7 @@
-"""Transaction payload validation for the single-stage C2B, B2C and B2B endpoints.
+"""Transaction payload validation for the OpenAPI single-stage operations.
 
-Each payload class declares its fields, the OpenAPI key for each, and which field is the
-recipient and which the payer; validation and serialisation are shared.
+Each payload class declares its fields, the OpenAPI key for each, and who is the recipient
+and payer; validation and serialisation are shared.
 
 Developers send friendly keys (``amount``, ``customer_msisdn`` ...). The raw OpenAPI
 names (``input_Amount`` ...) are accepted too. Country and currency come from the market.
@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import re
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any, ClassVar
@@ -23,15 +23,18 @@ _AMOUNT = re.compile(r"^\d*\.?\d+$")
 _SHORTCODE = re.compile(r"^[0-9A-Za-z]{4,12}$")
 _REFERENCE = re.compile(r"^\w{1,20}$", re.ASCII)
 _THIRD_PARTY_ID = re.compile(r"^\w{1,40}$", re.ASCII)
+_MPESA_TRANSACTION_ID = re.compile(r"^[0-9a-zA-Z]{1,20}$")
 
 # squashed key (lower-case, no "-", "_" or "input" prefix) -> canonical field name
-_COMMON_ALIASES = {
-    "amount": "amount",
-    "transactionreference": "transaction_reference",
-    "reference": "transaction_reference",
+_BASE_ALIASES = {
     "thirdpartyconversationid": "third_party_conversation_id",
     "idempotencykey": "third_party_conversation_id",
     "country": "country",
+}
+_PAYMENT_ALIASES = {
+    "amount": "amount",
+    "transactionreference": "transaction_reference",
+    "reference": "transaction_reference",
     "currency": "currency",
     "description": "items_desc",
 }
@@ -40,6 +43,9 @@ _COMMON_ALIASES = {
 def _squash(key: str) -> str:
     squashed = key.strip().lower().replace("-", "").replace("_", "")
     return squashed.removeprefix("input")
+
+
+Check = Callable[[Any], str]
 
 
 def _parse_amount(value: Any) -> str:
@@ -57,7 +63,7 @@ def _parse_amount(value: Any) -> str:
     return text
 
 
-def _match(pattern: re.Pattern[str], message: str):
+def _match(pattern: re.Pattern[str], message: str) -> Check:
     def check(value: Any) -> str:
         if not isinstance(value, str) or not pattern.match(value):
             raise ValueError(message)
@@ -72,7 +78,8 @@ def _description(value: Any) -> str:
     return value
 
 
-_REQUIRED = {
+_SHORTCODE_CHECK = _match(_SHORTCODE, "must be 4-12 letters/digits")
+_PAYMENT_REQUIRED: dict[str, Check] = {
     "amount": _parse_amount,
     "transaction_reference": _match(_REFERENCE, "must be 1-20 letters, digits or underscores"),
     "items_desc": _description,
@@ -80,26 +87,30 @@ _REQUIRED = {
 
 
 class SingleStagePayload:
-    """Base for validated single-stage payloads. Subclasses are frozen dataclasses."""
+    """Base for validated payloads. Subclasses are frozen dataclasses."""
 
     __slots__ = ()
 
-    DESC_FIELD: ClassVar[str]  # public name of the description field (used in error messages)
-    DESC_REQUEST_KEY: ClassVar[str]  # OpenAPI body key for the description
+    DESC_FIELD: ClassVar[str | None] = None  # public name of the description field, if any
+    DESC_REQUEST_KEY: ClassVar[str | None] = None  # OpenAPI body key for the description
     EXTRA_ALIASES: ClassVar[Mapping[str, str]] = {}  # squashed key -> field, per type
     REQUEST_KEYS: ClassVar[Mapping[str, str]]  # field -> OpenAPI body key (defines the body)
+    REQUIRED: ClassVar[Mapping[str, Check]] = _PAYMENT_REQUIRED  # mandatory non-code fields
+    OPTIONAL: ClassVar[Mapping[str, Check]] = {}  # optional fields (omitted when None)
     CODE_FIELDS: ClassVar[tuple[str, ...]] = ()  # shortcode-style fields
     MSISDN_FIELD: ClassVar[str | None] = None  # field holding a customer phone number
+    HAS_CURRENCY: ClassVar[bool] = True
+    AMOUNT_FIELD: ClassVar[str] = "amount"
     RECIPIENT_FIELD: ClassVar[str]  # who receives the funds
-    PAYER_FIELD: ClassVar[str]  # who the funds are taken from
+    PAYER_FIELD: ClassVar[str | None]  # who the funds are taken from (None if not known)
+    RELATED_FIELD: ClassVar[str | None] = None  # id of another transaction (reversals)
 
     @classmethod
     def _aliases(cls) -> dict[str, str]:
-        return {
-            **_COMMON_ALIASES,
-            **cls.EXTRA_ALIASES,
-            _squash(cls.DESC_REQUEST_KEY): "items_desc",
-        }
+        aliases = {**_BASE_ALIASES, **cls.EXTRA_ALIASES}
+        if cls.DESC_REQUEST_KEY:
+            aliases[_squash(cls.DESC_REQUEST_KEY)] = "items_desc"
+        return aliases
 
     @classmethod
     def _canonicalise(cls, raw: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, str]]:
@@ -126,15 +137,18 @@ class SingleStagePayload:
         fields, errors = cls._canonicalise(raw)
         clean: dict[str, str] = {}
 
-        validators = {
-            **_REQUIRED,
-            **{
-                name: _match(_SHORTCODE, "must be 4-12 letters/digits") for name in cls.CODE_FIELDS
-            },
-        }
-        for name, check in validators.items():
+        required = {**cls.REQUIRED, **dict.fromkeys(cls.CODE_FIELDS, _SHORTCODE_CHECK)}
+        for name, check in required.items():
             if name not in fields:
                 errors[name] = "is required"
+                continue
+            try:
+                clean[name] = check(fields[name])
+            except ValueError as exc:
+                errors[name] = str(exc)
+
+        for name, check in cls.OPTIONAL.items():
+            if fields.get(name) is None:
                 continue
             try:
                 clean[name] = check(fields[name])
@@ -157,11 +171,13 @@ class SingleStagePayload:
         else:
             clean["third_party_conversation_id"] = tp_id
 
-        for name, expected in (("country", market.country), ("currency", market.currency)):
-            given = fields.get(name, expected)
-            if given != expected:
-                errors[name] = f"must be {expected!r} for market {market.name}"
-            clean[name] = expected
+        expected = [("country", market.country)]
+        if cls.HAS_CURRENCY:
+            expected.append(("currency", market.currency))
+        for name, value in expected:
+            if fields.get(name, value) != value:
+                errors[name] = f"must be {value!r} for market {market.name}"
+            clean[name] = value
 
         if not errors:
             cls._cross_validate(clean, errors)
@@ -173,18 +189,19 @@ class SingleStagePayload:
 
     @classmethod
     def peek(cls, raw: Mapping[str, Any]) -> dict[str, str | None]:
-        """Best-effort amount/recipient/payer for the audit trail of a rejected payload."""
+        """Best-effort audit fields for a payload that failed validation."""
         fields, _ = cls._canonicalise(raw)
 
-        def text(name: str) -> str | None:
-            value = fields.get(name)
+        def text(name: str | None) -> str | None:
+            value = fields.get(name) if name else None
             return None if value is None else str(value)
 
         return {
-            "amount": text("amount"),
+            "amount": text(cls.AMOUNT_FIELD),
             "recipient": text(cls.RECIPIENT_FIELD),
             "payer": text(cls.PAYER_FIELD),
             "transaction_id": text("third_party_conversation_id"),
+            "related_transaction_id": text(cls.RELATED_FIELD),
         }
 
     @property
@@ -193,20 +210,27 @@ class SingleStagePayload:
         return getattr(self, self.RECIPIENT_FIELD)
 
     @property
-    def payer(self) -> str:
-        """The party the funds are taken from."""
-        return getattr(self, self.PAYER_FIELD)
+    def payer(self) -> str | None:
+        """The party the funds are taken from (``None`` when the payload does not say)."""
+        return getattr(self, self.PAYER_FIELD) if self.PAYER_FIELD else None
+
+    @property
+    def related_transaction_id(self) -> str | None:
+        """The M-Pesa transaction this one refers to (reversals), else ``None``."""
+        return getattr(self, self.RELATED_FIELD) if self.RELATED_FIELD else None
 
     @property
     def transaction_id(self) -> str:
         return self.third_party_conversation_id  # type: ignore[attr-defined]
 
     def to_request(self) -> dict[str, str]:
-        """The exact JSON body sent to M-Pesa."""
-        return {key: getattr(self, name) for name, key in self.REQUEST_KEYS.items()}
+        """The exact JSON body sent to M-Pesa (optional fields left out when unset)."""
+        body = {key: getattr(self, name) for name, key in self.REQUEST_KEYS.items()}
+        return {key: value for key, value in body.items() if value is not None}
 
 
 _CUSTOMER_ALIASES = {
+    **_PAYMENT_ALIASES,
     "customermsisdn": "customer_msisdn",
     "msisdn": "customer_msisdn",
     "serviceprovidercode": "service_provider_code",
@@ -240,14 +264,14 @@ class C2BSingleStagePayload(SingleStagePayload):
     country: str
     currency: str
 
-    DESC_FIELD: ClassVar[str] = "purchased_items_desc"
-    DESC_REQUEST_KEY: ClassVar[str] = "input_PurchasedItemsDesc"
+    DESC_FIELD: ClassVar[str | None] = "purchased_items_desc"
+    DESC_REQUEST_KEY: ClassVar[str | None] = "input_PurchasedItemsDesc"
     EXTRA_ALIASES: ClassVar[Mapping[str, str]] = _CUSTOMER_ALIASES
     REQUEST_KEYS: ClassVar[Mapping[str, str]] = _customer_request_keys("input_PurchasedItemsDesc")
     CODE_FIELDS: ClassVar[tuple[str, ...]] = ("service_provider_code",)
     MSISDN_FIELD: ClassVar[str | None] = "customer_msisdn"
     RECIPIENT_FIELD: ClassVar[str] = "service_provider_code"
-    PAYER_FIELD: ClassVar[str] = "customer_msisdn"
+    PAYER_FIELD: ClassVar[str | None] = "customer_msisdn"
 
 
 @dataclass(frozen=True, slots=True)
@@ -263,14 +287,14 @@ class B2CSingleStagePayload(SingleStagePayload):
     country: str
     currency: str
 
-    DESC_FIELD: ClassVar[str] = "payment_items_desc"
-    DESC_REQUEST_KEY: ClassVar[str] = "input_PaymentItemsDesc"
+    DESC_FIELD: ClassVar[str | None] = "payment_items_desc"
+    DESC_REQUEST_KEY: ClassVar[str | None] = "input_PaymentItemsDesc"
     EXTRA_ALIASES: ClassVar[Mapping[str, str]] = _CUSTOMER_ALIASES
     REQUEST_KEYS: ClassVar[Mapping[str, str]] = _customer_request_keys("input_PaymentItemsDesc")
     CODE_FIELDS: ClassVar[tuple[str, ...]] = ("service_provider_code",)
     MSISDN_FIELD: ClassVar[str | None] = "customer_msisdn"
     RECIPIENT_FIELD: ClassVar[str] = "customer_msisdn"
-    PAYER_FIELD: ClassVar[str] = "service_provider_code"
+    PAYER_FIELD: ClassVar[str | None] = "service_provider_code"
 
 
 @dataclass(frozen=True, slots=True)
@@ -286,9 +310,10 @@ class B2BSingleStagePayload(SingleStagePayload):
     country: str
     currency: str
 
-    DESC_FIELD: ClassVar[str] = "purchased_items_desc"
-    DESC_REQUEST_KEY: ClassVar[str] = "input_PurchasedItemsDesc"
+    DESC_FIELD: ClassVar[str | None] = "purchased_items_desc"
+    DESC_REQUEST_KEY: ClassVar[str | None] = "input_PurchasedItemsDesc"
     EXTRA_ALIASES: ClassVar[Mapping[str, str]] = {
+        **_PAYMENT_ALIASES,
         "primarypartycode": "primary_party_code",
         "primary": "primary_party_code",
         "receiverpartycode": "receiver_party_code",
@@ -306,9 +331,59 @@ class B2BSingleStagePayload(SingleStagePayload):
     }
     CODE_FIELDS: ClassVar[tuple[str, ...]] = ("primary_party_code", "receiver_party_code")
     RECIPIENT_FIELD: ClassVar[str] = "receiver_party_code"
-    PAYER_FIELD: ClassVar[str] = "primary_party_code"
+    PAYER_FIELD: ClassVar[str | None] = "primary_party_code"
 
     @classmethod
     def _cross_validate(cls, clean: dict[str, str], errors: dict[str, str]) -> None:
         if clean["primary_party_code"] == clean["receiver_party_code"]:
             errors["receiver_party_code"] = "must differ from primary_party_code"
+
+
+@dataclass(frozen=True, slots=True)
+class ReversalPayload(SingleStagePayload):
+    """Reverse a successful transaction by its M-Pesa transaction id.
+
+    ``reversal_amount`` is optional: leave it out to reverse the full amount. There is no
+    currency, reference or description in this call. The shortcode is the organisation the
+    reversed funds are credited to; the party the funds are taken from is whoever received the
+    original transaction, which the payload does not name, so ``payer`` is ``None``.
+    """
+
+    original_transaction_id: str
+    service_provider_code: str
+    third_party_conversation_id: str
+    country: str
+    reversal_amount: str | None = None
+
+    EXTRA_ALIASES: ClassVar[Mapping[str, str]] = {
+        "reversalamount": "reversal_amount",
+        "amount": "reversal_amount",
+        "transactionid": "original_transaction_id",
+        "originaltransactionid": "original_transaction_id",
+        "serviceprovidercode": "service_provider_code",
+        "shortcode": "service_provider_code",
+    }
+    REQUEST_KEYS: ClassVar[Mapping[str, str]] = {
+        "reversal_amount": "input_ReversalAmount",
+        "country": "input_Country",
+        "original_transaction_id": "input_TransactionID",
+        "service_provider_code": "input_ServiceProviderCode",
+        "third_party_conversation_id": "input_ThirdPartyConversationID",
+    }
+    REQUIRED: ClassVar[Mapping[str, Check]] = {
+        "original_transaction_id": _match(
+            _MPESA_TRANSACTION_ID, "must be 1-20 letters/digits (the M-Pesa transaction id)"
+        ),
+    }
+    OPTIONAL: ClassVar[Mapping[str, Check]] = {"reversal_amount": _parse_amount}
+    CODE_FIELDS: ClassVar[tuple[str, ...]] = ("service_provider_code",)
+    HAS_CURRENCY: ClassVar[bool] = False
+    AMOUNT_FIELD: ClassVar[str] = "reversal_amount"
+    RECIPIENT_FIELD: ClassVar[str] = "service_provider_code"
+    PAYER_FIELD: ClassVar[str | None] = None
+    RELATED_FIELD: ClassVar[str | None] = "original_transaction_id"
+
+    @property
+    def amount(self) -> str | None:
+        """The amount being reversed; ``None`` means the full original amount."""
+        return self.reversal_amount

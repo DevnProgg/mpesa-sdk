@@ -51,8 +51,13 @@ class MpesaHttpClient:
     async def get_session(self) -> ApiResponse:
         return await self._send("GET", "getSession/", self._config.api_key, None)
 
+    async def send(
+        self, method: str, path: str, session_key: str, payload: dict[str, Any]
+    ) -> ApiResponse:
+        return await self._send(method, path, session_key, payload)
+
     async def post(self, path: str, session_key: str, payload: dict[str, Any]) -> ApiResponse:
-        return await self._send("POST", path, session_key, payload)
+        return await self.send("POST", path, session_key, payload)
 
     async def _send(
         self, method: str, path: str, token: str, payload: dict[str, Any] | None

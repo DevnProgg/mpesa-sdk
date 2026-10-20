@@ -111,6 +111,7 @@ def test_peek_for_rejected_payload(b2b):
         "recipient": "ORG001",
         "payer": "ORG002",
         "transaction_id": "tp0001",
+        "related_transaction_id": None,
     }
 
 

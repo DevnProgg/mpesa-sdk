@@ -39,7 +39,7 @@ class AttemptRecord:
 class AuditTrail:
     transaction_id: str  # == input_ThirdPartyConversationID, the idempotency key
     transaction_type: str
-    amount: str | None
+    amount: str | None  # None on a full reversal (the original amount)
     currency: str | None
     recipient: str | None  # who receives the funds (C2B: business shortcode)
     payer: str | None
@@ -53,6 +53,8 @@ class AuditTrail:
     mpesa_transaction_id: str | None = None
     callback: dict[str, Any] | None = None  # async result, once received
     completed_at: str | None = None
+    # For reversals: the M-Pesa transaction id being reversed (None for payments).
+    related_transaction_id: str | None = None
 
     @property
     def log(self) -> dict[str, Any]:
